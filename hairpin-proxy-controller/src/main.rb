@@ -7,14 +7,15 @@ require "optparse"
 require "socket"
 
 class HairpinProxyController
+  SERVICE_NAME = ENV.fetch("SERVICE_NAME", "hairpin-proxy")
+  NAMESPACE = ENV.fetch("KUBE_NAMESPACE", "hairpin-proxy")
   COMMENT_LINE_SUFFIX = "# Added by hairpin-proxy"
-  DNS_REWRITE_DESTINATION = "hairpin-proxy.hairpin-proxy.svc.cluster.local"
+  DNS_REWRITE_DESTINATION = "#{SERVICE_NAME}.#{NAMESPACE}.svc.cluster.local"
   POLL_INTERVAL = ENV.fetch("POLL_INTERVAL", "15").to_i.clamp(1..)
 
-  # Kubernetes <= 1.18 puts Ingress in "extensions/v1beta1"
-  # Kubernetes >= 1.19 puts Ingress in "networking.k8s.io/v1"
-  # (We search both for maximum compatibility.)
-  INGRESS_API_VERSIONS = ["extensions/v1beta1", "networking.k8s.io/v1"].freeze
+  INGRESS_API_VERSION = ENV.fetch("INGRESS_API_VERSION", "networking.k8s.io/v1")
+  INGRESS_HOSTS_SOURCE = ENV.fetch("INGRESS_HOSTS_SOURCE", "spec.tls.hosts")
+  INGRESS_CLASS_NAME = ENV.fetch("INGRESS_CLASS_NAME", "")
 
   def initialize
     @k8s = K8s::Client.in_cluster_config
@@ -24,19 +25,33 @@ class HairpinProxyController
   end
 
   def fetch_ingress_hosts
-    # Return a sorted Array of all unique hostnames mentioned in Ingress spec.tls.hosts blocks, in all namespaces.
-    all_ingresses = INGRESS_API_VERSIONS.map { |api_version|
-      begin
-        @k8s.api(api_version).resource("ingresses").list
+    # Return a sorted Array of all unique hostnames mentioned in Ingress, in all namespaces.
+    all_ingresses = begin
+        @k8s.api(INGRESS_API_VERSION).resource("ingresses").list
       rescue K8s::Error::NotFound, K8s::Error::UndefinedResource
         @log.warn("Warning: Unable to list ingresses in #{api_version}")
         []
       end
-    }.flatten
-    all_tls_blocks = all_ingresses.map { |r| r.spec.tls }.flatten.compact
-    hosts = all_tls_blocks.map(&:hosts).flatten.compact
+
+    unless INGRESS_CLASS_NAME.empty?
+      all_ingresses.filter! { |r| r.spec.ingressClassName == INGRESS_CLASS_NAME }
+    end
+
+    hosts = all_ingresses.map { |r| hosts_from_ingress(r) }
     hosts.filter! { |host| /\A[A-Za-z0-9.\-_]+\z/.match?(host) }
     hosts.sort.uniq
+  end
+
+  def hosts_from_ingress(ingress)
+    case INGRESS_HOSTS_SOURCE
+    when "spec.tls.hosts"
+      ingress.spec.tls.map(&:hosts).flatten.compact
+    when "spec.rules.host"
+      ingress.spec.rules.map(&:host).compact
+    else
+      @log.warn("Warning: Unsupported host source #{INGRESS_HOSTS_SOURCE}")
+      []
+    end
   end
 
   def coredns_corefile_with_rewrite_rules(original_corefile, hosts)
