@@ -37,7 +37,7 @@ class HairpinProxyController
       all_ingresses.filter! { |r| r.spec.ingressClassName == INGRESS_CLASS_NAME }
     end
 
-    hosts = all_ingresses.map { |r| hosts_from_ingress(r) }
+    hosts = all_ingresses.map { |r| hosts_from_ingress(r) || [] }.flatten.compact
     hosts.filter! { |host| /\A[A-Za-z0-9.\-_]+\z/.match?(host) }
     hosts.sort.uniq
   end
@@ -45,12 +45,12 @@ class HairpinProxyController
   def hosts_from_ingress(ingress)
     case INGRESS_HOSTS_SOURCE
     when "spec.tls.hosts"
-      ingress.spec.tls.map(&:hosts).flatten.compact
+      ingress.spec.&tls.map(&:hosts).flatten.compact
     when "spec.rules.host"
-      ingress.spec.rules.map(&:host).compact
+      ingress.spec.&rules.map(&:host).compact
     else
       @log.warn("Warning: Unsupported host source #{INGRESS_HOSTS_SOURCE}")
-      []
+      nil
     end
   end
 
