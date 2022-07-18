@@ -1,0 +1,11 @@
+services:
+  controller:
+    image: quay.io/inviqa_images/hairpin-proxy:controller${TAG_SUFFIX}
+    build:
+      context: ./hairpin-proxy-controller
+      # Uncomment out this for development convenience.
+      #target: build
+  haproxy:
+    image: quay.io/inviqa_images/hairpin-proxy:haproxy${TAG_SUFFIX}
+    build:
+      context: ./hairpin-proxy-haproxy
