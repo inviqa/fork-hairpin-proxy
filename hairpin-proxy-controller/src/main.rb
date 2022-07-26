@@ -12,6 +12,7 @@ class HairpinProxyController
   COMMENT_LINE_SUFFIX = "# Added by hairpin-proxy"
   DNS_REWRITE_DESTINATION = "#{SERVICE_NAME}.#{NAMESPACE}.svc.cluster.local"
   POLL_INTERVAL = ENV.fetch("POLL_INTERVAL", "15").to_i.clamp(1..)
+  KUBE_TOKEN_TTL = ENV.fetch("KUBE_TOKEN_TTL", "600").to_i.clamp(1..)
 
   INGRESS_API_VERSION = ENV.fetch("INGRESS_API_VERSION", "networking.k8s.io/v1")
   INGRESS_HOSTS_SOURCE = ENV.fetch("INGRESS_HOSTS_SOURCE", "spec.tls.hosts")
@@ -127,6 +128,7 @@ class HairpinProxyController
 
   def main_loop
     etchosts_path = nil
+    kube_token_expiry = Time.new + KUBE_TOKEN_TTL
 
     OptionParser.new { |opts|
       opts.on("--etc-hosts ETCHOSTSPATH", "Path to writable /etc/hosts file") do |h|
@@ -145,6 +147,12 @@ class HairpinProxyController
 
     @log.info("Starting main_loop with #{POLL_INTERVAL}s polling interval.")
     loop do
+      if Time.new > kube_token_expiry
+        @log.info("Renewing k8s api token")
+        @k8s = K8s::Client.in_cluster_config
+        kube_token_expiry = Time.new + KUBE_TOKEN_TTL
+      end
+
       if etchosts_path.nil?
         check_and_rewrite_coredns
       else
