@@ -4,6 +4,21 @@ PROXY protocol support for internal-to-LoadBalancer traffic for Kubernetes Ingre
 
 If you've had problems with ingress-nginx, cert-manager, LetsEncrypt ACME HTTP01 self-check failures, and the PROXY protocol, read on.
 
+## Table of Contents
+
+- [One-line install](#one-line-install)
+- [The PROXY Protocol](#the-proxy-protocol)
+- [The Problem](#the-problem)
+- [Possible Solutions](#possible-solutions)
+- [The hairpin-proxy Solution](#the-hairpin-proxy-solution)
+- [CoreDNS override mode](#coredns-override-mode)
+- [Installation and Testing](#installation-and-testing)
+  - [Step 0: Confirm that HTTP does NOT work from containers in your cluster](#step-0-confirm-that-http-does-not-work-from-containers-in-your-cluster)
+  - [Step 1: Install hairpin-proxy in your Kubernetes cluster](#step-1-install-hairpin-proxy-in-your-kubernetes-cluster)
+  - [Step 2: Confirm that your CoreDNS configuration was updated](#step-2-confirm-that-your-coredns-configuration-was-updated)
+  - [Step 3: Confirm that your DNS has propagated and that HTTP now works from containers in your cluster](#step-3-confirm-that-your-dns-has-propagated-and-that-http-now-works-from-containers-in-your-cluster)
+  - [Step 4: (Optional) Install hairpin-proxy-etchosts-controller DaemonSet](#step-4-optional-install-hairpin-proxy-etchosts-controller-daemonset)
+
 ## One-line install
 
 ```shell
@@ -29,9 +44,9 @@ In this case, Kubernetes networking is too smart for its own good. [See upstream
 
 An ingress controller service deploys a LoadBalancer, which is provisioned by your cloud provider. Kubernetes notices the LoadBalancer's external IP address. As an "optimization", kube-proxy on each node writes iptables rules that rewrite all outbound traffic to the LoadBalancer's external IP address to instead be redirected to the cluster-internal Service ClusterIP address. If your cloud load balancer doesn't modify the traffic, then indeed this is a helpful optimization.
 
-However, when you have the PROXY protocol enabled, the external load balancer _does_ modify the traffic, prepending the PROXY line before each TCP connection. If you connect directly to the web server internally, bypassing the external load balancer, then it will receive traffic _without_ the PROXY line. In the case of ingress-nginx with `use-proxy-protocol: "true"`, you'll find that NGINX fails when receiving a bare GET request. As a result, accessing http://subdomain.example.com/ from inside the cluster fails!
+However, when you have the PROXY protocol enabled, the external load balancer _does_ modify the traffic, prepending the PROXY line before each TCP connection. If you connect directly to the web server internally, bypassing the external load balancer, then it will receive traffic _without_ the PROXY line. In the case of ingress-nginx with `use-proxy-protocol: "true"`, you'll find that NGINX fails when receiving a bare GET request. As a result, accessing `http://subdomain.example.com/` from inside the cluster fails!
 
-This is particularly a problem when using cert-manager for provisioning SSL certificates. Cert-manager uses HTTP01 validation, and before asking LetsEncrypt to hit http://subdomain.example.com/.well-known/acme-challenge/some-special-code, it tries to access this URL itself as a self-check. This fails. Cert-manager does not allow you to skip the self-check. As a result, your certificate is never provisioned, even though the verification URL would be perfectly accessible externally. See upstream cert-manager issues: [proxy_protocol mode breaks HTTP01 challenge Check stage](https://github.com/jetstack/cert-manager/issues/466), [http-01 self check failed for domain](https://github.com/jetstack/cert-manager/issues/656), [Self check always fail](https://github.com/jetstack/cert-manager/issues/863)
+This is particularly a problem when using cert-manager for provisioning SSL certificates. Cert-manager uses HTTP01 validation, and before asking LetsEncrypt to hit `http://subdomain.example.com/.well-known/acme-challenge/some-special-code`, it tries to access this URL itself as a self-check. This fails. Cert-manager does not allow you to skip the self-check. As a result, your certificate is never provisioned, even though the verification URL would be perfectly accessible externally. See upstream cert-manager issues: [proxy_protocol mode breaks HTTP01 challenge Check stage](https://github.com/jetstack/cert-manager/issues/466), [http-01 self check failed for domain](https://github.com/jetstack/cert-manager/issues/656), [Self check always fail](https://github.com/jetstack/cert-manager/issues/863)
 
 ## Possible Solutions
 
@@ -49,7 +64,59 @@ None of these are particularly easy without modifying upstream packages, and the
 1. hairpin-proxy intercepts and modifies cluster-internal DNS lookups for hostnames that are served by your ingress controller, pointing them to the IP of an internal `hairpin-proxy-haproxy` service instead. (This DNS redirection is managed by `hairpin-proxy-controller`, which simply polls the Kubernetes API for new/modified Ingress resources, examines their `spec.tls.hosts`, and updates the CoreDNS ConfigMap when necessary.)
 2. The internal `hairpin-proxy-haproxy` service runs a minimal HAProxy instance which is configured to append the PROXY line and forward the traffic on to the internal ingress controller.
 
-As a result, when pods in your cluster (such as cert-manager) try to access http://your-site/, they resolve to the hairpin-proxy, which adds the PROXY line and sends it to your `ingress-nginx`. The NGINX parses the PROXY protocol just as it would if it had come from an external load balancer, so it sees a valid request and handles it identically to external requests.
+As a result, when pods in your cluster (such as cert-manager) try to access `http://your-site/`, they resolve to the hairpin-proxy, which adds the PROXY line and sends it to your `ingress-nginx`. The NGINX parses the PROXY protocol just as it would if it had come from an external load balancer, so it sees a valid request and handles it identically to external requests.
+
+## CoreDNS override mode
+
+Set `COREDNS_CONFIG_MODE=override` on a controller image built from this source
+to write rewrites to `kube-system/coredns-custom`, key `hairpin.override`, instead
+of the managed `coredns/Corefile`. Existing published images do not support this
+mode. The default `corefile` mode and `deploy.yml` installation are unchanged.
+
+CoreDNS must mount `coredns-custom` and import `custom/*.override` inside its
+main server block. The controller owns only `hairpin.override`, preserves other
+keys, creates the ConfigMap if missing, and rereads on the next poll after a
+write conflict. Ingress selection and Service/namespace settings are unchanged.
+
+For example, add this environment entry to the controller Deployment:
+
+```yaml
+- name: COREDNS_CONFIG_MODE
+  value: override
+```
+
+Replace the rules of the controller Role in `kube-system` with:
+
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [coredns-custom]
+    verbs: [get, watch, update]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create]
+```
+
+Kubernetes cannot restrict create permission by resource name. If your policy
+prohibits it, pre-create the ConfigMap and omit the create rule. Use only one
+writer for `hairpin.override`; other writers must preserve this key.
+
+For migration, deploy the new image with the mode and matching Role, wait for
+the old pod to stop and for the override to load, then remove only the old
+`# Added by hairpin-proxy` lines from the main Corefile. Allow volume propagation,
+DNS reload and cache expiration, then check each DNS replica resolves your
+Ingress hostnames to the hairpin Service. Do not change provider-management
+labels. Inspect the generated rules with:
+
+```sh
+kubectl -n kube-system get configmap coredns-custom \
+  -o go-template='{{ index .data "hairpin.override" }}'
+```
+
+For rollback, restore the old image, mode and Role together, then remove only
+`hairpin.override` from the custom ConfigMap. This restores legacy behavior and
+may restore the original conflict with a provider-managed Corefile.
 
 ## Installation and Testing
 
@@ -96,7 +163,7 @@ kubectl get configmap -n kube-system coredns -o=jsonpath='{.data.Corefile}'
 
 Once the hairpin-proxy-controller pod starts, you should immediately see one [rewrite](https://coredns.io/plugins/rewrite/) line per TLS-enabled ingress host, such as:
 
-```
+```text
 rewrite name subdomain.example.com hairpin-proxy.hairpin-proxy.svc.cluster.local # Added by hairpin-proxy
 ```
 
