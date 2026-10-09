@@ -14,11 +14,15 @@ class HairpinProxyController
   POLL_INTERVAL = ENV.fetch("POLL_INTERVAL", "15").to_i.clamp(1..)
   KUBE_TOKEN_TTL = ENV.fetch("KUBE_TOKEN_TTL", "600").to_i.clamp(1..)
 
+  COREDNS_CONFIG_MODE = ENV.fetch("COREDNS_CONFIG_MODE", "corefile")
+
   INGRESS_API_VERSION = ENV.fetch("INGRESS_API_VERSION", "networking.k8s.io/v1")
   INGRESS_HOSTS_SOURCE = ENV.fetch("INGRESS_HOSTS_SOURCE", "spec.tls.hosts")
   INGRESS_CLASS_NAME = ENV.fetch("INGRESS_CLASS_NAME", "")
 
   def initialize
+    raise "Unsupported COREDNS_CONFIG_MODE: #{COREDNS_CONFIG_MODE}" unless %w[corefile override].include?(COREDNS_CONFIG_MODE)
+
     @k8s = K8s::Client.in_cluster_config
 
     STDOUT.sync = true
@@ -76,6 +80,8 @@ class HairpinProxyController
   def check_and_rewrite_coredns
     @log.info("Polling all Ingress resources and CoreDNS configuration...")
     hosts = fetch_ingress_hosts
+    return check_and_rewrite_coredns_override(hosts) if COREDNS_CONFIG_MODE == "override"
+
     cm = @k8s.api.resource("configmaps", namespace: "kube-system").get("coredns")
 
     old_corefile = cm.data.Corefile
@@ -86,6 +92,40 @@ class HairpinProxyController
       cm.data.Corefile = new_corefile
       @k8s.api.resource("configmaps", namespace: "kube-system").update_resource(cm)
     end
+  end
+
+  def check_and_rewrite_coredns_override(hosts)
+    # CoreDNS must import this file inside its main server block.
+    # Own only this key; preserve other custom DNS configuration.
+    rewrite_lines = hosts.map { |host| "rewrite name #{host} #{DNS_REWRITE_DESTINATION} #{COMMENT_LINE_SUFFIX}" }
+    override = rewrite_lines.empty? ? "" : rewrite_lines.join("\n") + "\n"
+    configmaps = @k8s.api.resource("configmaps", namespace: "kube-system")
+
+    begin
+      cm = configmaps.get("coredns-custom")
+    rescue K8s::Error::NotFound
+      cm = K8s::Resource.new(
+        apiVersion: "v1",
+        kind: "ConfigMap",
+        metadata: { name: "coredns-custom", namespace: "kube-system" },
+        data: { "hairpin.override" => override }
+      )
+      configmaps.create_resource(cm)
+      @log.info("Created coredns-custom/hairpin.override with #{hosts.length} rewrite rules")
+      return
+    end
+
+    data = (cm.to_h[:data] || {}).dup
+    return if data[:"hairpin.override"] == override
+
+    data[:"hairpin.override"] = override
+    cm.data = data
+    configmaps.update_resource(cm)
+    @log.info("Updated coredns-custom/hairpin.override with #{hosts.length} rewrite rules")
+  rescue K8s::Error::Conflict
+    # Another writer may create the ConfigMap or update another custom key.
+    # Re-read on the next poll instead of reusing a stale resource version.
+    @log.warn("coredns-custom changed concurrently; retrying on the next poll")
   end
 
   def dns_rewrite_destination_ip_address
