@@ -68,15 +68,9 @@ As a result, when pods in your cluster (such as cert-manager) try to access `htt
 
 ## CoreDNS override mode
 
-Set `COREDNS_CONFIG_MODE=override` on a controller image built from this source
-to write rewrites to `kube-system/coredns-custom`, key `hairpin.override`, instead
-of the managed `coredns/Corefile`. Existing published images do not support this
-mode. The default `corefile` mode and `deploy.yml` installation are unchanged.
+Set `COREDNS_CONFIG_MODE=override` on a controller image built from this source to write rewrites to `kube-system/coredns-custom`, key `hairpin.override`, instead of the managed `coredns/Corefile`. Existing published images do not support this mode. The default `corefile` mode and `deploy.yml` installation are unchanged.
 
-CoreDNS must mount `coredns-custom` and import `custom/*.override` inside its
-main server block. The controller owns only `hairpin.override`, preserves other
-keys, creates the ConfigMap if missing, and rereads on the next poll after a
-write conflict. Ingress selection and Service/namespace settings are unchanged.
+CoreDNS must mount `coredns-custom` and import `custom/*.override` inside its main server block. The controller owns only `hairpin.override`, preserves other keys, creates the ConfigMap if missing, and rereads on the next poll after a write conflict. Ingress selection and Service/namespace settings are unchanged.
 
 For example, add this environment entry to the controller Deployment:
 
@@ -98,25 +92,16 @@ rules:
     verbs: [create]
 ```
 
-Kubernetes cannot restrict create permission by resource name. If your policy
-prohibits it, pre-create the ConfigMap and omit the create rule. Use only one
-writer for `hairpin.override`; other writers must preserve this key.
+Kubernetes cannot restrict create permission by resource name. If your policy prohibits it, pre-create the ConfigMap and omit the create rule. Use only one writer for `hairpin.override`; other writers must preserve this key.
 
-For migration, deploy the new image with the mode and matching Role, wait for
-the old pod to stop and for the override to load, then remove only the old
-`# Added by hairpin-proxy` lines from the main Corefile. Allow volume propagation,
-DNS reload and cache expiration, then check each DNS replica resolves your
-Ingress hostnames to the hairpin Service. Do not change provider-management
-labels. Inspect the generated rules with:
+For migration, deploy the new image with the mode and matching Role, wait for the old pod to stop and for the override to load, then remove only the old `# Added by hairpin-proxy` lines from the main Corefile. Allow volume propagation, DNS reload and cache expiration, then check each DNS replica resolves your Ingress hostnames to the hairpin Service. Do not change provider-management labels. Inspect the generated rules with:
 
 ```sh
 kubectl -n kube-system get configmap coredns-custom \
   -o go-template='{{ index .data "hairpin.override" }}'
 ```
 
-For rollback, restore the old image, mode and Role together, then remove only
-`hairpin.override` from the custom ConfigMap. This restores legacy behavior and
-may restore the original conflict with a provider-managed Corefile.
+For rollback, restore the old image, mode and Role together, then remove only `hairpin.override` from the custom ConfigMap. This restores legacy behavior and may restore the original conflict with a provider-managed Corefile.
 
 ## Installation and Testing
 
