@@ -4,7 +4,6 @@ metadata:
   name: hairpin-proxy
 
 ---
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,7 +33,6 @@ spec:
               cpu: "50m"
 
 ---
-
 apiVersion: v1
 kind: Service
 metadata:
@@ -47,14 +45,13 @@ spec:
     - name: http
       protocol: TCP
       port: 80
-      targetPort: 80
+      targetPort: 8080
     - name: https
       protocol: TCP
       port: 443
-      targetPort: 443
+      targetPort: 8443
 
 ---
-
 kind: ServiceAccount
 apiVersion: v1
 metadata:
@@ -62,7 +59,6 @@ metadata:
   namespace: hairpin-proxy
 
 ---
-
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
@@ -79,7 +75,6 @@ rules:
       - watch
 
 ---
-
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -94,7 +89,6 @@ subjects:
     namespace: hairpin-proxy
 
 ---
-
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -112,7 +106,6 @@ rules:
       - update
 
 ---
-
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -128,7 +121,6 @@ subjects:
     namespace: hairpin-proxy
 
 ---
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
