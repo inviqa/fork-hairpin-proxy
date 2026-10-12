@@ -1,7 +1,7 @@
 FROM haproxy:3.4-alpine
 
-EXPOSE 80
-EXPOSE 443
+EXPOSE 8080
+EXPOSE 8443
 
 # By default, forward all HTTP requests to an ingress-nginx.
 # If using a different ingress controller, you may override TARGET_SERVER at runtime.
